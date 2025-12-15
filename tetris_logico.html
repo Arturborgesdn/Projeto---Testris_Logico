@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tetris Lógico</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, query, orderBy, limit, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variáveis globais para uso no escopo do p5.js
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.highScores = [];
+        window.personalBest = 0;
+        window.isAuthReady = false;
+
+        // Configuração Firebase (RF09)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+
+        if (firebaseConfig) {
+            try {
+                const app = initializeApp(firebaseConfig);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
+
+                // Autenticação (RF09)
+                onAuthStateChanged(window.auth, async (user) => {
+                    if (user) {
+                        window.userId = user.uid;
+                    } else {
+                        try {
+                            const result = await signInAnonymously(window.auth);
+                            window.userId = result.user.uid;
+                        } catch (error) {
+                            console.error("Erro ao fazer login anônimo:", error);
+                            window.userId = crypto.randomUUID(); // Fallback
+                        }
+                    }
+                    window.isAuthReady = true;
+                    console.log("Firebase Auth Ready. User ID:", window.userId);
+                    loadHighScores(); 
+                });
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    signInWithCustomToken(window.auth, __initial_auth_token).catch(e => {
+                        console.error("Erro ao usar token customizado, caindo para anônimo.", e);
+                    });
+                } else if (!window.auth.currentUser) {
+                    signInAnonymously(window.auth);
+                }
+
+            } catch (e) {
+                console.error("Erro na inicialização do Firebase:", e);
+                window.isAuthReady = true;
+                window.userId = 'local_user';
+            }
+        } else {
+            console.warn("Configuração Firebase não encontrada. Pontuações serão salvas localmente/não salvas.");
+            window.isAuthReady = true;
+            window.userId = 'local_user';
+        }
+
+        // Função para carregar as pontuações (RF09)
+        async function loadHighScores() {
+            if (!window.db) return;
+            try {
+                const highScoresCollectionRef = collection(window.db, `artifacts/${appId}/public/data/highScores`);
+                const q = query(highScoresCollectionRef, orderBy("score", "desc"), limit(10));
+                const querySnapshot = await getDocs(q);
+
+                window.highScores = querySnapshot.docs.map(doc => doc.data());
+                
+                const currentUserScoreEntry = window.highScores.find(s => s.userId === window.userId);
+                const userNameInput = document.getElementById('userNameInput'); 
+                
+                if (currentUserScoreEntry) {
+                    window.personalBest = currentUserScoreEntry.score;
+                    if (currentUserScoreEntry.userName && userNameInput) {
+                        userNameInput.value = currentUserScoreEntry.userName;
+                    }
+                } else {
+                    window.personalBest = 0;
+                }
+
+            } catch (e) {
+                console.error("Erro ao carregar High Scores:", e);
+            }
+        }
+
+        window.loadHighScores = loadHighScores;
+
+        // Função para salvar pontuação (RF09)
+        window.saveHighScore = async function(score) {
+            if (!window.db || !window.userId) {
+                console.warn("Não é possível salvar a pontuação sem DB/UserID.");
+                return;
+            }
+            
+            const userNameInput = document.getElementById('userNameInput');
+            const finalUserName = userNameInput ? userNameInput.value || "Jogador" : "Jogador";
+
+            try {
+                const docRef = doc(window.db, `artifacts/${appId}/public/data/highScores`, window.userId);
+
+                if (score > window.personalBest || !window.highScores.some(s => s.userId === window.userId)) {
+                    await setDoc(docRef, {
+                        userId: window.userId,
+                        userName: finalUserName, 
+                        score: score,
+                        timestamp: new Date().toISOString()
+                    }, { merge: true }); 
+                    window.personalBest = score;
+                } else {
+                    await setDoc(docRef, {
+                        userName: finalUserName,
+                        timestamp: new Date().toISOString()
+                    }, { merge: true });
+                }
+                
+                loadHighScores();
+            } catch (e) {
+                console.error("Erro ao salvar pontuação:", e);
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937; /* Cinza Escuro */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        #game-container {
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr; /* Placar | Jogo | Cola */
+            gap: 20px;
+            max-width: 1200px;
+            width: 100%;
+        }
+        canvas {
+            border-radius: 0.75rem; /* rounded-xl */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+            background-color: #111827; /* Fundo do tabuleiro */
+            margin: 0 auto;
+        }
+        .panel {
+            background-color: #374151; /* Cinza Médio */
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            color: #d1d5db; /* Texto Claro */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            overflow-y: auto; /* Para a cola */
+        }
+        .panel h2 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #f3f4f6;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #4b5563;
+            padding-bottom: 0.5rem;
+        }
+        .code-container {
+            background-color: #1f2937;
+            padding: 8px;
+            border-radius: 6px;
+            margin-top: 5px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            overflow-x: auto;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            z-index: 10;
+            display: none; /* Controlado pelo JS */
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            border-radius: 0.75rem;
+        }
+        #overlay button {
+            background-color: #10b981; /* Verde esmeralda */
+            color: #1f2937;
+            padding: 10px 20px;
+            margin-top: 20px;
+            border-radius: 0.5rem;
+            font-size: 1.25rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.1s;
+        }
+        #overlay button:hover {
+            background-color: #059669;
+            transform: scale(1.05);
+        }
+        #overlay button:active {
+            transform: scale(0.95);
+        }
+        .limit-line {
+            stroke: #ef4444; /* Vermelho */
+            stroke-width: 2;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div class="panel">
+            <h2>📊 Pontuação </h2>
+            
+            <div class="mt-2 mb-4">
+                <label for="userNameInput" class="block text-sm font-medium text-gray-400">Nome:</label>
+                <input type="text" id="userNameInput" value="Jogador" placeholder="Seu Nome" class="mt-1 block w-full rounded-md bg-gray-600 border-gray-500 text-white p-2 text-sm focus:ring-green-500 focus:border-green-500" maxlength="15">
+            </div>
+
+            <p>Pontos: <span id="scoreDisplay">0</span></p>
+            <p class="font-bold text-yellow-400">Recorde: <span id="personalBestDisplay">0</span></p>
+
+            <p>Próximo Bloco:</p>
+            <div id="nextBlockDisplay" class="code-container text-center text-xl">?</div>
+
+            <h3 class="mt-4 border-b border-gray-600 pb-2">Recordes Mundiais</h3>
+            <ul id="highScoresList" class="space-y-1 text-sm">
+                <li>Carregando...</li>
+            </ul>
+
+            <h3 class="mt-4 border-b border-gray-600 pb-2">Seu Recorde</h3>
+            <div id="personalBestSummary" class="text-sm font-semibold text-gray-200">
+                <p>Nome: <span id="summaryUserName">...</span></p>
+                <p>Pontos: <span id="summaryBestScore">...</span></p>
+            </div>
+        </div>
+
+        <div id="canvas-container" class="relative">
+            <div id="overlay">
+                <h1 id="overlay-title" class="text-4xl font-bold mb-4">Tetris Lógico</h1>
+                <p id="overlay-message" class="text-lg text-center mx-10">
+                    Mova e gire os blocos lógicos. O objetivo é combinar dois blocos adjacentes
+                    que sejam logicamente equivalentes (ex: P → Q e ¬P ∨ Q).
+                </p>
+                <div class="mt-4">
+                    <p class="font-bold">Controles:</p>
+                    <ul class="text-left mx-auto max-w-xs space-y-1">
+                        <li>**← / →**: Mover para os lados</li>
+                        <li>**↑ / Z**: Girar bloco</li>
+                        <li>**↓**: Queda suave</li>
+                        <li>**Espaço**: Queda instantânea</li>
+                    </ul>
+                </div>
+                <button id="startButton">INICIAR JOGO</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📜 Cola Lógica </h2>
+            <p class="text-sm italic mb-3">Monte dois blocos adjacentes que sejam equivalentes para pontuar e limpar a área.</p>
+            <div class="text-xs space-y-3" id="equivalence-list-container"></div>
+        </div>
+    </div>
+
+    <script>
+        // === CONSTANTES DE JOGO ===
+        const BASE_SPEED = 60; // Velocidade inicial (frames por drop)
+        const SPEED_FACTOR = 0.85; // Fator de aumento de velocidade
+        const MIN_SPEED = 10; // Velocidade máxima
+        const LEVEL_UP_CLEARS = 3; // Equivalências para subir de nível
+        const EQUIVALENCE_CHANCE = 0.25; // 25% chance de vir o par equivalente
+        const COMPLEXITY_LEVEL = 3; // Nível para liberar peças complexas
+
+        // === VARIÁVEIS GLOBAIS DO JOGO ===
+        let CELL_SIZE = 30;
+        const GRID_W = 10;
+        const GRID_H = 20;
+        let board = [];
+        let currentBlock = null;
+        let nextBlock = null;
+        let nextBlockId = 1;
+        let score = 0;
+        let level = 1;
+        let speed = BASE_SPEED;
+        let frameCountDrop = 0;
+        let gameState = 'MENU';
+        let clearsSinceLevelUp = 0;
+        
+        // SISTEMA DE SACO (BAG) - Correção para evitar repetição
+        let bag = []; 
+
+        // Variáveis do UI
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const nextBlockDisplay = document.getElementById('nextBlockDisplay');
+        const personalBestDisplay = document.getElementById('personalBestDisplay');
+        const overlay = document.getElementById('overlay');
+        const overlayTitle = document.getElementById('overlay-title');
+        const overlayMessage = document.getElementById('overlay-message');
+        const startButton = document.getElementById('startButton');
+        const highScoresList = document.getElementById('highScoresList');
+        const equivalenceListContainer = document.getElementById('equivalence-list-container');
+        const userNameInput = document.getElementById('userNameInput');
+        const summaryUserName = document.getElementById('summaryUserName');
+        const summaryBestScore = document.getElementById('summaryBestScore');
+
+        // =========================================================
+        // === DEFINIÇÕES DE LÓGICA ===
+        // =========================================================
+
+        const SYMBOLS = {
+            'P': { color: '#00B050', size: 1, text: 'P' },
+            'Q': { color: '#0070C0', size: 1, text: 'Q' },
+            'neg': { color: '#800080', size: 1, text: '¬' },
+            'and': { color: '#FFC000', size: 1, text: '∧' },
+            'or': { color: '#00FFFF', size: 1, text: '∨' },
+            'imp': { color: '#7030A0', size: 1, text: '→' },
+            'open': { color: '#D3D3D3', size: 1, text: '(' },
+            'close': { color: '#D3D3D3', size: 1, text: ')' }
+        };
+
+        const EQUIVALENCE_SETS = [
+            { color: '#10b981', expressions: ['P', '¬¬P'], name: '1. Dupla Negação', complex: false },
+            { color: '#3b82f6', expressions: ['P → Q', '¬P ∨ Q'], name: '2. Implicação', complex: false },
+            { color: '#9333ea', expressions: ['P → Q', '¬Q → ¬P'], name: '3. Contrapositiva', complex: false },
+            { color: '#f59e0b', expressions: ['¬(P ∧ Q)', '¬P ∨ ¬Q'], name: '4. De Morgan I', complex: true },
+            { color: '#f97316', expressions: ['¬(P ∨ Q)', '¬P ∧ ¬Q'], name: '5. De Morgan II', complex: true },
+            { color: '#ef4444', expressions: ['P ∧ (P ∨ Q)', 'P'], name: '6. Absorção I', complex: true },
+            { color: '#06b6d4', expressions: ['P ∨ (P ∧ Q)', 'P'], name: '7. Absorção II', complex: true },
+        ];
+
+        const EXPRESSION_MAP = new Map();
+        EQUIVALENCE_SETS.forEach(set => {
+            set.expressions.forEach(exp => {
+                EXPRESSION_MAP.set(exp, { 
+                    color: set.color, 
+                    equivalenceGroup: set.expressions, 
+                    name: set.name,
+                    complex: set.complex 
+                });
+            });
+        });
+
+        const BLOCK_PROTOTYPES_DEF = [
+            { formula: 'P', shape: [[{ sym: 'P' }]] },
+            { formula: '¬¬P', shape: [[{ sym: 'neg' }, { sym: 'neg' }, { sym: 'P' }]] },
+            { formula: 'P → Q', shape: [[{ sym: 'P' }, { sym: 'imp' }, { sym: 'Q' }]] },
+            { formula: '¬P ∨ Q', shape: [[{ sym: 'neg' }, { sym: 'P' }, { sym: 'or' }, { sym: 'Q' }]] },
+            { formula: '¬Q → ¬P', shape: [[{ sym: 'neg' }, { sym: 'Q' }, { sym: 'imp' }, { sym: 'neg' }, { sym: 'P' }]] },
+            { formula: '¬(P ∧ Q)', shape: [[{ sym: 'neg' }, { sym: 'open' }, { sym: 'P' }, { sym: 'and' }, { sym: 'Q' }, { sym: 'close' }]] },
+            { formula: '¬P ∨ ¬Q', shape: [[{ sym: 'neg' }, { sym: 'P' }, { sym: 'or' }, { sym: 'neg' }, { sym: 'Q' }]] },
+            { formula: '¬(P ∨ Q)', shape: [[{ sym: 'neg' }, { sym: 'open' }, { sym: 'P' }, { sym: 'or' }, { sym: 'Q' }, { sym: 'close' }]] },
+            { formula: '¬P ∧ ¬Q', shape: [[{ sym: 'neg' }, { sym: 'P' }, { sym: 'and' }, { sym: 'neg' }, { sym: 'Q' }]] },
+            { formula: 'P ∧ (P ∨ Q)', shape: [[{ sym: 'P' }, { sym: 'and' }, { sym: 'open' }, { sym: 'P' }, { sym: 'or' }, { sym: 'Q' }, { sym: 'close' }]] },
+            { formula: 'P ∨ (P ∧ Q)', shape: [[{ sym: 'P' }, { sym: 'or' }, { sym: 'open' }, { sym: 'P' }, { sym: 'and' }, { sym: 'Q' }, { sym: 'close' }]] },
+        ];
+
+        let FINAL_BLOCK_PROTOTYPES = BLOCK_PROTOTYPES_DEF.filter(p => EXPRESSION_MAP.has(p.formula)).map(p => ({
+            ...p,
+            w: p.shape[0].length,
+            h: p.shape.length,
+            expression: p.formula
+        }));
+
+
+        // === FUNÇÕES DE LÓGICA DO JOGO ===
+
+        function setup() {
+            const canvas = createCanvas(GRID_W * CELL_SIZE, GRID_H * CELL_SIZE);
+            canvas.parent('canvas-container');
+            frameRate(60);
+            initializeBoard();
+            setupMenu();
+            updateUIDisplays();
+            updateEquivalenceList();
+        }
+
+        function initializeBoard() {
+            board = Array(GRID_H).fill(0).map(() => Array(GRID_W).fill(null));
+            nextBlockId = 1;
+            score = 0;
+            level = 1;
+            speed = BASE_SPEED;
+            clearsSinceLevelUp = 0;
+            bag = []; // Reinicia o saco
+        }
+
+        function setupMenu() {
+            startButton.onclick = () => {
+                startGame();
+            };
+        }
+
+        function startGame() {
+            if (!userNameInput.value.trim()) {
+                overlayTitle.textContent = "ERRO: Nome Necessário";
+                overlayMessage.innerHTML = `<p class="text-red-400 font-semibold">Por favor, insira seu nome no painel lateral antes de começar a jogar.</p>`;
+                overlay.style.display = 'flex';
+                startButton.textContent = "TENTAR NOVAMENTE";
+                return;
+            }
+
+            initializeBoard();
+            gameState = 'PLAYING';
+            overlay.style.display = 'none';
+            level = 1;
+            speed = BASE_SPEED;
+            
+            nextBlock = generateBlock();
+            spawnBlock();
+        }
+
+        function updateUIDisplays() {
+            const summaryUserName = document.getElementById('summaryUserName');
+            const summaryBestScore = document.getElementById('summaryBestScore');
+            
+            scoreDisplay.textContent = score;
+            personalBestDisplay.textContent = window.personalBest;
+            
+            if (highScoresList) {
+                highScoresList.innerHTML = window.highScores.map((s, index) =>
+                    `<li class="${s.userId === window.userId ? 'font-bold text-yellow-300' : ''}">
+                        ${index + 1}. ${s.score} (${s.userName || s.userId.substring(0, 4) + '...'})
+                    </li>`).join('');
+            }
+            
+            const currentUserName = userNameInput.value || "Jogador";
+            if (summaryUserName) summaryUserName.textContent = currentUserName;
+            if (summaryBestScore) summaryBestScore.textContent = window.personalBest;
+        }
+
+        function updateEquivalenceList() {
+            if (!equivalenceListContainer) return;
+
+            equivalenceListContainer.innerHTML = EQUIVALENCE_SETS.map(set => `
+                <div>
+                    <span class="font-semibold" style="color: ${set.color};">${set.name}:</span>
+                    <div class="code-container">${set.expressions.join(' ⇔ ')}</div>
+                </div>
+            `).join('');
+        }
+
+        // Função AUXILIAR para criar bloco a partir do protótipo
+        function createBlockFromPrototype(prototype) {
+            const blockData = EXPRESSION_MAP.get(prototype.expression);
+            return {
+                id: nextBlockId++, 
+                x: floor(GRID_W / 2) - floor(prototype.w / 2),
+                y: 0,
+                shape: JSON.parse(JSON.stringify(prototype.shape)), 
+                w: prototype.w,
+                h: prototype.shape.length,
+                expression: prototype.expression,
+                color: blockData.color,
+                equivalenceGroup: blockData.equivalenceGroup
+            };
+        }
+
+        function generateBlock() {
+            // 1. Define quais protótipos estão disponíveis neste nível
+            let availablePrototypes = FINAL_BLOCK_PROTOTYPES;
+            
+            // Se o nível for baixo, remove as complexas (filtro)
+            if (level < COMPLEXITY_LEVEL) {
+                availablePrototypes = availablePrototypes.filter(p => !EXPRESSION_MAP.get(p.expression).complex);
+            }
+            
+            // 2. Chance de 25% de forçar o par equivalente (Bônus Lógico)
+            const isCurrentBlockAvailable = !!currentBlock;
+            const generateEquivalentPair = (isCurrentBlockAvailable && random() < EQUIVALENCE_CHANCE);
+
+            if (generateEquivalentPair) {
+                const currentExp = currentBlock.expression;
+                const group = currentBlock.equivalenceGroup;
+                const equivalentExp = group.find(exp => exp !== currentExp);
+                
+                if (equivalentExp) {
+                    const forcedPrototype = availablePrototypes.find(p => p.expression === equivalentExp);
+                    if (forcedPrototype) {
+                        return createBlockFromPrototype(forcedPrototype);
+                    }
+                }
+            } 
+            
+            // 3. SISTEMA DE SACO (BAG SYSTEM) - Garante variedade
+            // Se o saco estiver vazio, enche com as peças disponíveis no nível
+            if (bag.length === 0) {
+                bag = [...availablePrototypes];
+            }
+
+            // Retira um item aleatório do saco
+            const randomIndex = floor(random() * bag.length);
+            const prototype = bag.splice(randomIndex, 1)[0]; // Remove e pega o item
+
+            return createBlockFromPrototype(prototype);
+        }
+
+        function spawnBlock() {
+            currentBlock = nextBlock;
+            nextBlock = generateBlock();
+            nextBlockDisplay.textContent = currentBlock.expression;
+
+            if (!isValidMove(currentBlock.x, currentBlock.y, currentBlock.shape)) {
+                gameOver();
+                return false;
+            }
+            return true;
+        }
+
+        function isValidMove(x, y, shape) {
+            for (let i = 0; i < shape.length; i++) {
+                for (let j = 0; j < shape[i].length; j++) {
+                    if (shape[i][j]) {
+                        const newX = x + j;
+                        const newY = y + i;
+
+                        if (newX < 0 || newX >= GRID_W || newY >= GRID_H) {
+                            return false;
+                        }
+                        if (newY >= 0 && board[newY][newX]) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        function moveBlock(dx, dy) {
+            const newX = currentBlock.x + dx;
+            const newY = currentBlock.y + dy;
+            if (isValidMove(newX, newY, currentBlock.shape)) {
+                currentBlock.x = newX;
+                currentBlock.y = newY;
+                return true;
+            }
+            return false;
+        }
+
+        function rotateBlock() {
+            if (currentBlock.w !== currentBlock.h) {
+                const newShape = [];
+                for (let j = 0; j < currentBlock.w; j++) {
+                    newShape[j] = [];
+                    for (let i = 0; i < currentBlock.h; i++) {
+                        newShape[j][i] = currentBlock.shape[i][j];
+                    }
+                }
+                const newW = currentBlock.h;
+                const newH = currentBlock.w;
+
+                let offsetX = 0;
+                let offsetY = 0;
+                const testOffsets = [[0, 0], [-1, 0], [1, 0]]; 
+
+                let canRotate = false;
+                for (let [ox, oy] of testOffsets) {
+                      if (isValidMove(currentBlock.x + ox, currentBlock.y + oy, newShape)) {
+                        offsetX = ox;
+                        offsetY = oy;
+                        canRotate = true;
+                        break;
+                    }
+                }
+
+                if (canRotate) {
+                    currentBlock.shape = newShape;
+                    currentBlock.w = newW;
+                    currentBlock.h = newH;
+                    currentBlock.x += offsetX;
+                    currentBlock.y += offsetY;
+                }
+            }
+        }
+
+        function lockBlock() {
+            let lossCondition = false;
+
+            for (let i = 0; i < currentBlock.h; i++) {
+                for (let j = 0; j < currentBlock.w; j++) {
+                    if (currentBlock.shape[i][j]) {
+                        const finalY = currentBlock.y + i;
+                        
+                        if (finalY < 2) { 
+                            lossCondition = true;
+                        }
+
+                        board[finalY][currentBlock.x + j] = {
+                            id: currentBlock.id,
+                            color: currentBlock.color,
+                            expression: currentBlock.expression,
+                            equivalenceGroup: currentBlock.equivalenceGroup,
+                            symbol: currentBlock.shape[i][j].sym
+                        };
+                    }
+                }
+            }
+            
+            if (lossCondition) {
+                gameOver();
+                return;
+            }
+
+            clearEquivalences();
+            spawnBlock();
+        }
+
+        function dropBlock() {
+            while (moveBlock(0, 1)) {
+            }
+            lockBlock();
+        }
+
+        function clearEquivalences() {
+            const blocksToClear = new Set();
+            const affectedColumns = new Set();
+            let clearedCount = 0;
+
+            for (let i = 0; i < GRID_H; i++) {
+                for (let j = 0; j < GRID_W; j++) {
+                    const cellA = board[i][j];
+                    if (!cellA) continue;
+
+                    // Direita
+                    if (j < GRID_W - 1) {
+                        const cellB = board[i][j + 1];
+                        if (cellB && cellA.id !== cellB.id) {
+                            const isEquivalent = (cellA.color === cellB.color) && 
+                                                 (cellA.expression !== cellB.expression) && 
+                                                 cellA.equivalenceGroup.includes(cellB.expression) &&
+                                                 cellB.equivalenceGroup.includes(cellA.expression);
+                            if (isEquivalent) {
+                                blocksToClear.add(cellA.id);
+                                blocksToClear.add(cellB.id);
+                                clearedCount++;
+                                affectedColumns.add(j);
+                                affectedColumns.add(j + 1);
+                            }
+                        }
+                    }
+
+                    // Baixo
+                    if (i < GRID_H - 1) {
+                        const cellB = board[i + 1][j];
+                        if (cellB && cellA.id !== cellB.id) {
+                            const isEquivalent = (cellA.color === cellB.color) && 
+                                                 (cellA.expression !== cellB.expression) && 
+                                                 cellA.equivalenceGroup.includes(cellB.expression) &&
+                                                 cellB.equivalenceGroup.includes(cellA.expression);
+                            if (isEquivalent) {
+                                blocksToClear.add(cellA.id);
+                                blocksToClear.add(cellB.id);
+                                clearedCount++;
+                                affectedColumns.add(j);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (blocksToClear.size > 0) {
+                score += clearedCount * 100;
+                
+                clearsSinceLevelUp += clearedCount;
+                if (clearsSinceLevelUp >= LEVEL_UP_CLEARS) {
+                    level++;
+                    clearsSinceLevelUp = 0;
+                }
+
+                speed = max(MIN_SPEED, BASE_SPEED * Math.pow(SPEED_FACTOR, level - 1));
+                updateUIDisplays();
+
+                for (let i = 0; i < GRID_H; i++) {
+                    for (let j = 0; j < GRID_W; j++) {
+                        if (board[i][j] && blocksToClear.has(board[i][j].id)) {
+                            board[i][j] = null;
+                        }
+                    }
+                }
+
+                if (applyGravity(affectedColumns)) {
+                    clearEquivalences(); 
+                }
+
+                return true;
+            }
+            return false;
+        }
+
+        function applyGravity(affectedColumns) {
+            let moved = false;
+            
+            for (const j of affectedColumns) {
+                for (let i = GRID_H - 2; i >= 0; i--) { 
+                    if (board[i][j] !== null) {
+                        if (board[i + 1][j] === null) {
+                            board[i + 1][j] = board[i][j];
+                            board[i][j] = null;
+                            moved = true;
+                        }
+                    }
+                }
+            }
+            return moved; 
+        }
+
+        function gameOver() {
+            gameState = 'GAME_OVER';
+            overlay.style.display = 'flex';
+            overlayTitle.textContent = "GAME OVER";
+            
+            const finalUserName = userNameInput.value.trim() || "Jogador";
+            overlayMessage.innerHTML = `Parabéns, <strong>${finalUserName}</strong>! Sua pontuação final foi: <strong>${score}</strong>.<br>Tente novamente!`;
+            startButton.textContent = "JOGAR NOVAMENTE";
+            
+            if (window.isAuthReady && window.saveHighScore) {
+                 window.saveHighScore(score);
+            }
+        }
+
+        // === FUNÇÕES DE DESENHO P5.JS ===
+
+        function drawBoard() {
+            noStroke();
+            for (let i = 0; i < GRID_H; i++) {
+                for (let j = 0; j < GRID_W; j++) {
+                    const cell = board[i][j];
+                    if (cell) {
+                        fill(cell.color);
+                        rect(j * CELL_SIZE, i * CELL_SIZE, CELL_SIZE, CELL_SIZE, 5);
+                        
+                        fill(255);
+                        textAlign(CENTER, CENTER);
+                        textSize(CELL_SIZE * 0.5);
+                        text(SYMBOLS[cell.symbol] ? SYMBOLS[cell.symbol].text : '?', j * CELL_SIZE + CELL_SIZE / 2, i * CELL_SIZE + CELL_SIZE / 2);
+                    } else {
+                        fill(18, 18, 25, 50); 
+                        rect(j * CELL_SIZE, i * CELL_SIZE, CELL_SIZE, CELL_SIZE, 3);
+                    }
+                }
+            }
+        }
+
+        function drawCurrentBlock() {
+            if (!currentBlock) return;
+
+            fill(currentBlock.color);
+
+            for (let i = 0; i < currentBlock.h; i++) {
+                for (let j = 0; j < currentBlock.w; j++) {
+                    const cellData = currentBlock.shape[i][j];
+                    if (cellData) {
+                        const x = (currentBlock.x + j) * CELL_SIZE;
+                        const y = (currentBlock.y + i) * CELL_SIZE;
+
+                        fill(currentBlock.color);
+                        rect(x, y, CELL_SIZE, CELL_SIZE, 5);
+
+                        fill(255);
+                        textAlign(CENTER, CENTER);
+                        textSize(CELL_SIZE * 0.5);
+                        text(SYMBOLS[cellData.sym].text, x + CELL_SIZE / 2, y + CELL_SIZE / 2);
+                    }
+                }
+            }
+        }
+
+        function drawLimitLine() {
+            const limitY = 2; 
+            stroke(239, 68, 68); 
+            strokeWeight(2);
+            line(0, limitY * CELL_SIZE, width, limitY * CELL_SIZE);
+            noStroke();
+        }
+
+        function draw() {
+            background(17, 24, 39); 
+            updateUIDisplays();
+
+            if (gameState === 'PLAYING') {
+                drawBoard();
+                drawLimitLine();
+                drawCurrentBlock();
+
+                frameCountDrop++;
+                if (frameCountDrop >= speed) {
+                    if (!moveBlock(0, 1)) {
+                        lockBlock();
+                    }
+                    frameCountDrop = 0;
+                }
+            } else if (gameState === 'MENU' || gameState === 'GAME_OVER') {
+                drawBoard();
+                drawLimitLine();
+                overlay.style.display = 'flex';
+                overlay.style.width = width + 'px';
+                overlay.style.height = height + 'px';
+            }
+        }
+
+        // === CONTROLES ===
+        function keyPressed() {
+            if (gameState !== 'PLAYING' || !currentBlock) return;
+
+            if (keyCode === LEFT_ARROW) {
+                moveBlock(-1, 0);
+            } else if (keyCode === RIGHT_ARROW) {
+                moveBlock(1, 0);
+            } else if (keyCode === DOWN_ARROW) {
+                moveBlock(0, 1);
+            } else if (keyCode === UP_ARROW || key === 'z' || key === 'Z') {
+                rotateBlock();
+            } else if (key === ' ') {
+                dropBlock(); 
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            if (canvas) {
+                resizeCanvas(GRID_W * CELL_SIZE, GRID_H * CELL_SIZE);
+            }
+        });
+    </script>
+</body>
+</html>
